@@ -47,6 +47,7 @@ export default function App() {
       // Validate/clean domain but only for links, not fetch path (always use '/api/*')
       const cleanDomain = getCleanJiraDomain(domain);
 
+      // Refactored: handles body only once per response
       // Authenticate by calling proxied /api/myself endpoint
       const myselfRes = await fetch(
         `/api/myself`,
@@ -59,35 +60,43 @@ export default function App() {
         }
       );
 
-      // Handle response with single body read per response
       let jiraUserData = null;
       if (!myselfRes.ok) {
-        let errMsg;
+        // Always only read the response body ONCE
+        let message = "";
+        let status = myselfRes.status;
+        let errObj = { status, message: myselfRes.statusText };
         try {
-          // Try parsing JSON response for error
-          const errorJson = await myselfRes.json();
-          if (myselfRes.status === 401) {
-            errMsg =
-              "Authentication failed. Please check your credentials.";
+          const isJson =
+            myselfRes.headers
+              .get("content-type")
+              ?.includes("application/json") || false;
+          if (isJson) {
+            const errorJson = await myselfRes.json();
+            message =
+              status === 401
+                ? "Authentication failed. Please check your credentials."
+                : ((errorJson &&
+                    (errorJson.errorMessages?.join(" | ") ||
+                      errorJson.error)) ||
+                  myselfRes.statusText ||
+                  status);
           } else {
-            errMsg =
-              "Login error: " +
-              (
-                (errorJson && (errorJson.errorMessages?.join(" | ") || errorJson.error)) ||
-                myselfRes.statusText ||
-                myselfRes.status
-              );
+            const errorText = await myselfRes.text();
+            message =
+              status === 401
+                ? "Authentication failed. Please check your credentials."
+                : "Login error: " +
+                  (errorText || myselfRes.statusText || status);
           }
-        } catch {
-          // If error body is not valid JSON, fallback to text
-          const text = await myselfRes.text();
-          errMsg =
-            myselfRes.status === 401
+        } catch (errParse) {
+          message =
+            status === 401
               ? "Authentication failed. Please check your credentials."
-              : "Login error: " + (text || myselfRes.statusText || myselfRes.status);
+              : "Login error: " + (myselfRes.statusText || status);
         }
         setStep("login");
-        setError(errMsg);
+        setError(message);
         return;
       } else {
         jiraUserData = await myselfRes.json();
@@ -123,30 +132,40 @@ export default function App() {
 
       let projectsListObj;
       if (!projectRes.ok) {
-        let errMsg;
+        // Only read response body ONCE for errors
+        let status = projectRes.status;
+        let message = "";
         try {
-          const errorJson = await projectRes.json();
-          if (projectRes.status === 401) {
-            errMsg =
-              "Not authenticated with Jira (invalid API token or expired, or insufficient permissions).";
+          const isJson =
+            projectRes.headers
+              .get("content-type")
+              ?.includes("application/json") || false;
+          if (isJson) {
+            const errorJson = await projectRes.json();
+            message =
+              status === 401
+                ? "Not authenticated with Jira (invalid API token or expired, or insufficient permissions)."
+                : ((errorJson &&
+                    (errorJson.errorMessages?.join(" | ") ||
+                      errorJson.error)) ||
+                  projectRes.statusText ||
+                  status);
           } else {
-            errMsg =
-              "Failed to fetch projects: " +
-              (
-                (errorJson && (errorJson.errorMessages?.join(" | ") || errorJson.error)) ||
-                projectRes.statusText ||
-                projectRes.status
-              );
+            const text = await projectRes.text();
+            message =
+              status === 401
+                ? "Not authenticated with Jira (invalid API token or expired, or insufficient permissions)."
+                : "Failed to fetch projects: " +
+                  (text || projectRes.statusText || status);
           }
-        } catch {
-          const text = await projectRes.text();
-          errMsg =
-            projectRes.status === 401
+        } catch (parseErr) {
+          message =
+            status === 401
               ? "Not authenticated with Jira (invalid API token or expired, or insufficient permissions)."
-              : "Failed to fetch projects: " + (text || projectRes.statusText || projectRes.status);
+              : "Failed to fetch projects: " + (projectRes.statusText || status);
         }
         setStep("login");
-        setError(errMsg);
+        setError(message);
         return;
       } else {
         projectsListObj = await projectRes.json();
