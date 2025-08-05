@@ -17,15 +17,17 @@ export default function App() {
   const [jiraProjects, setJiraProjects] = useState([]);
   const [selectedProjectKey, setSelectedProjectKey] = useState(null);
 
-  // Helper: Build Jira API Base URL
-  const getJiraApiBase = () => {
-    // Accepts workspace input as either "your-domain.atlassian.net" or "your-domain" or with/without protocol
+  // Backend proxy API base
+  const BACKEND_BASE = ""; // relative path, assuming same origin/proxy
+
+  // Helper: Normalize Atlassian domain for board links
+  function getCleanJiraDomain() {
     let url = domain.trim().replace(/^https?:\/\//, "");
     if (!url.endsWith(".atlassian.net")) {
       url = url.split("/")[0].replace(/\/$/, "") + ".atlassian.net";
     }
-    return `https://${url}/rest/api/3`;
-  };
+    return url;
+  }
 
   // Handler: login form submit
   const handleLogin = async (e) => {
@@ -37,55 +39,85 @@ export default function App() {
     }
     setStep("loading");
     try {
-      // 1. Authenticate against /myself
-      const myselfRes = await fetch(`${getJiraApiBase()}/myself`, {
-        method: "GET",
+      // 1. Authenticate via backend proxy (never send credentials to Jira directly from client)
+      const myselfRes = await fetch(`${BACKEND_BASE}/api/login`, {
+        method: "POST",
         headers: {
-          "Authorization": "Basic " + btoa(`${email}:${apiToken}`),
-          "Accept": "application/json",
+          "Content-Type": "application/json",
+          Accept: "application/json",
         },
+        credentials: "include",
+        body: JSON.stringify({
+          domain,
+          email,
+          apiToken,
+        }),
       });
-
+      // Error handling
       if (myselfRes.status === 401) {
         setStep("login");
         setError("Authentication failed. Please check your credentials.");
         return;
       }
       if (!myselfRes.ok) {
+        const errData = await myselfRes.json().catch(() => null);
         setStep("login");
-        setError("Jira API error: " + myselfRes.status + " " + myselfRes.statusText);
+        setError(
+          "Login error: " + (errData?.error || myselfRes.statusText || myselfRes.status)
+        );
         return;
       }
-      const userData = await myselfRes.json();
-      setJiraUser(userData);
+      const resData = await myselfRes.json();
+      if (!resData.success) {
+        setStep("login");
+        setError(resData.error || "Login failed.");
+        return;
+      }
+      setJiraUser(resData.user);
 
-      // 2. Fetch projects
-      const projRes = await fetch(
-        `${getJiraApiBase()}/project/search?expand=description,lead,avatarUrls&orderBy=key`,
-        {
-          headers: {
-            "Authorization": "Basic " + btoa(`${email}:${apiToken}`),
-            "Accept": "application/json",
-          },
-        }
-      );
-      if (!projRes.ok) {
+      // 2. Fetch projects from backend proxy (session must be set now)
+      const projRes = await fetch(`${BACKEND_BASE}/api/projects`, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+        credentials: "include",
+      });
+      if (projRes.status === 401) {
         setStep("login");
-        setError("Failed to fetch projects from Jira: " + projRes.status);
+        setError("Not authenticated with Jira (session expired?).");
         return;
       }
-      const { values: projects } = await projRes.json();
+      if (!projRes.ok) {
+        const errData = await projRes.json().catch(() => null);
+        setStep("login");
+        setError(
+          "Failed to fetch projects: " + (errData?.error || projRes.statusText || projRes.status)
+        );
+        return;
+      }
+      const projectsResp = await projRes.json();
+      const projects = projectsResp.values || projectsResp.projects || [];
       setJiraProjects(projects);
       setSelectedProjectKey(projects && projects.length > 0 ? projects[0].key : null);
       setStep("dashboard");
     } catch (err) {
       setStep("login");
-      setError("Network error: " + (err.message || "Could not connect to Jira."));
+      setError("Network error: " + (err.message || "Could not connect to backend."));
     }
   };
 
   // Handler: Logout
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      // Notify backend to clear Jira session credentials
+      await fetch("/api/logout", {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch (err) {
+      // Swallow errors (logout is client and server idempotent)
+    }
     setEmail("");
     setDomain("");
     setApiToken("");
@@ -249,6 +281,7 @@ export default function App() {
         </div>
       );
     }
+    const cleanDomain = getCleanJiraDomain();
     return (
       <div className="project-detail-card">
         <div className="project-card-header">
@@ -268,7 +301,8 @@ export default function App() {
           {project.lead?.displayName || "Unknown"} ({project.lead?.emailAddress || "?"})
         </div>
         <div className="project-info">
-          <b>Description:</b> {project.description ? (
+          <b>Description:</b>{" "}
+          {project.description ? (
             typeof project.description === "string"
               ? project.description
               : (project.description.plain?.text || "")
@@ -278,7 +312,7 @@ export default function App() {
         </div>
         <div className="project-links">
           <a
-            href={`https://${domain.replace(/^https?:\/\//, "").replace(/\/$/, "")}.atlassian.net/jira/software/c/projects/${project.key}/boards`}
+            href={`https://${cleanDomain}/jira/software/c/projects/${project.key}/boards`}
             target="_blank"
             rel="noopener noreferrer"
           >
