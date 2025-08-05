@@ -34,10 +34,36 @@ export default [
     },
   },
   {
+    files: ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"],
     languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
       globals: {
+        // Browser globals
+        window: "readonly",
         document: "readonly",
+        console: "readonly",
+        fetch: "readonly",
+        btoa: "readonly",
+        atob: "readonly",
+        URL: "readonly",
+        URLSearchParams: "readonly",
+        FormData: "readonly",
+        CustomEvent: "readonly",
+        sessionStorage: "readonly",
+        localStorage: "readonly",
+        location: "readonly",
+        navigator: "readonly",
+        // Vite globals
+        import: "readonly",
       },
+    },
+    rules: {
+      "no-unused-vars": ["error", { 
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_"
+      }],
     },
   },
 ];
