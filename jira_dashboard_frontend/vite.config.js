@@ -14,6 +14,16 @@ export default defineConfig({
         },
         watch: {
             usePolling: true
+        },
+        // Proxy all API requests to the backend during development
+        proxy: {
+            // Forward /api/* requests to backend running at localhost:4000
+            '^/api.*': {
+                target: 'http://localhost:4000',
+                changeOrigin: true,
+                secure: false,
+                // Don't rewrite, keep /api prefix since backend uses it.
+            }
         }
     }
 })
