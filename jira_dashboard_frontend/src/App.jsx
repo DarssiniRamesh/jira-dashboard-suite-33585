@@ -3,7 +3,8 @@ import React, { useState } from "react";
 // PUBLIC_INTERFACE
 /**
  * App - Root component for the Jira Dashboard frontend.
- * Handles: Jira credential login, live authentication, project fetching, responsive dashboard UI, and logout.
+ * Handles: Jira credential login, live authentication, project fetching, modern dashboard UI, and logout.
+ * Refactored to remove all backend proxy references: Jira API calls use only the proxied /api/... endpoints (handled by Vite).
  */
 export default function App() {
   // App states
@@ -17,7 +18,7 @@ export default function App() {
   const [jiraProjects, setJiraProjects] = useState([]);
   const [selectedProjectKey, setSelectedProjectKey] = useState(null);
 
-  // Returns standardized Jira domain for board links and requests
+  // Returns standardized Jira domain for generating links
   function getCleanJiraDomain(inputDomain) {
     let url = (inputDomain || domain || "").trim().replace(/^https?:\/\//, "");
     if (!url.endsWith(".atlassian.net")) {
@@ -26,13 +27,14 @@ export default function App() {
     return url;
   }
 
-  // Helper: Create Authorization header for Jira API (apiToken must be provided)
+  // Helper: Create Authorization header value for Jira API requests
   function getJiraAuthHeader(emailArg, apiTokenArg) {
     const encoded = btoa(`${emailArg}:${apiTokenArg}`);
     return `Basic ${encoded}`;
   }
 
   // Handler: login form submit
+  // Directly calls Jira's /myself and /project/search endpoints (proxied via Vite), handles raw errors
   const handleLogin = async (e) => {
     e.preventDefault();
     setError("");
@@ -42,10 +44,10 @@ export default function App() {
     }
     setStep("loading");
     try {
-      // Clean domain to standard Atlassian format
+      // Validate/clean domain but only for links, not fetch path (always use '/api/*')
       const cleanDomain = getCleanJiraDomain(domain);
 
-      // 1. Authenticate directly with Jira API using fetch to proxied /api/myself
+      // Authenticate by calling proxied /api/myself endpoint
       const myselfRes = await fetch(
         `/api/myself`,
         {
@@ -57,22 +59,41 @@ export default function App() {
         }
       );
 
+      let jiraUserData = null;
       if (myselfRes.status === 401) {
         setStep("login");
         setError("Authentication failed. Please check your credentials.");
         return;
-      }
-      if (!myselfRes.ok) {
-        const errData = await myselfRes.json().catch(() => null);
+      } else if (!myselfRes.ok) {
+        // Jira may return raw errors, display best feedback
+        let errText, errData;
+        try {
+          errData = await myselfRes.json();
+        } catch {
+          errText = await myselfRes.text();
+        }
         setStep("login");
         setError(
-          "Login error: " + (errData?.error || myselfRes.statusText || myselfRes.status)
+          "Login error: " +
+            (errData && (errData.errorMessages?.join(" | ") || errData.error) ||
+            errText ||
+            myselfRes.statusText ||
+            myselfRes.status)
+        );
+        return;
+      } else {
+        jiraUserData = await myselfRes.json();
+      }
+
+      if (!jiraUserData || !jiraUserData.displayName) {
+        setStep("login");
+        setError(
+          "Could not get user profile info from Jira (API returned no user data)."
         );
         return;
       }
-      const jiraUserData = await myselfRes.json();
 
-      // Save user fields locally; unlike proxy, all credentials are only in frontend state (not sent to server)
+      // Store minimal user info only in frontend state
       const minimalUser = {
         displayName: jiraUserData.displayName,
         emailAddress: jiraUserData.emailAddress,
@@ -80,42 +101,58 @@ export default function App() {
       };
       setJiraUser(minimalUser);
 
-      // 2. Fetch user's projects from proxied Jira endpoint, again with credentials
-      //   https://${domain}/rest/api/3/project/search?expand=description,lead,avatarUrls&orderBy=key
-      const projectURL = `/api/project/search?expand=description,lead,avatarUrls&orderBy=key`;
-      const projRes = await fetch(projectURL, {
-        method: "GET",
-        headers: {
-          Authorization: getJiraAuthHeader(email, apiToken),
-          Accept: "application/json",
-        },
-      });
-      if (projRes.status === 401) {
-        setStep("login");
-        setError("Not authenticated with Jira (invalid API token or expired).");
-        return;
-      }
-      if (!projRes.ok) {
-        const errData = await projRes.json().catch(() => null);
+      // Now get user's projects from proxied /api/project/search
+      const projectRes = await fetch(
+        `/api/project/search?expand=description,lead,avatarUrls&orderBy=key`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: getJiraAuthHeader(email, apiToken),
+            Accept: "application/json",
+          },
+        }
+      );
+
+      let projectsListObj, errRespText, errRespJson;
+      if (projectRes.status === 401) {
         setStep("login");
         setError(
-          "Failed to fetch projects: " + (errData?.error || projRes.statusText || projRes.status)
+          "Not authenticated with Jira (invalid API token or expired, or insufficient permissions)."
         );
         return;
       }
-      const projectsResp = await projRes.json();
-      const projects = projectsResp.values || projectsResp.projects || [];
+      if (!projectRes.ok) {
+        try {
+          errRespJson = await projectRes.json();
+        } catch {
+          errRespText = await projectRes.text();
+        }
+        setStep("login");
+        setError(
+          "Failed to fetch projects: " +
+            (errRespJson && (errRespJson.errorMessages?.join(" | ") || errRespJson.error) ||
+            errRespText ||
+            projectRes.statusText ||
+            projectRes.status)
+        );
+        return;
+      }
+      projectsListObj = await projectRes.json();
+      const projects = projectsListObj.values || projectsListObj.projects || [];
       setJiraProjects(projects);
       setSelectedProjectKey(projects && projects.length > 0 ? projects[0].key : null);
       setStep("dashboard");
     } catch (err) {
       setStep("login");
-      setError("Network error: " + (err.message || "Could not connect to Jira API."));
+      setError(
+        "Network error: " +
+          ((err && err.message) || "Could not connect to Jira API.")
+      );
     }
   };
 
-  // Handler: Logout (frontend only, just clears local state)
-  const handleLogout = async () => {
+  // Handler: Logout (frontend only, fully resets all state)
+  const handleLogout = () => {
     setEmail("");
     setDomain("");
     setApiToken("");
@@ -126,10 +163,10 @@ export default function App() {
     setStep("login");
   };
 
-  // Handler: Switch sidebar project selection
+  // Handler: Select a project in the sidebar
   const handleSelectProject = (key) => setSelectedProjectKey(key);
 
-  // Render: login form
+  // Login form view
   function LoginForm() {
     return (
       <div className="login-form-container">
@@ -215,7 +252,7 @@ export default function App() {
     );
   }
 
-  // Render: Top Navigation Bar
+  // Top navigation bar view
   function TopNav() {
     return (
       <nav className="topnav">
@@ -235,7 +272,7 @@ export default function App() {
     );
   }
 
-  // Render: Sidebar with projects
+  // Sidebar project list view
   function ProjectSidebar() {
     return (
       <aside className="sidebar">
@@ -259,7 +296,7 @@ export default function App() {
                 className="dot"
                 style={{
                   background:
-                    `url(${proj.avatarUrls["16x16"] || proj.avatarUrls["48x48"]}) no-repeat center/cover, var(--primary)`,
+                    `url(${proj.avatarUrls?.["16x16"] || proj.avatarUrls?.["48x48"]}) no-repeat center/cover, var(--primary)`,
                 }}
               />
               <span className="sidebar-project-name">{proj.name}</span>
@@ -270,7 +307,7 @@ export default function App() {
     );
   }
 
-  // Render: Project Details Card
+  // Project detail card (main content)
   function ProjectDetailCard({ project }) {
     if (!project) {
       return (
@@ -286,7 +323,7 @@ export default function App() {
           <span
             className="project-avatar"
             style={{
-              backgroundImage: `url(${project.avatarUrls["48x48"]})`,
+              backgroundImage: `url(${project.avatarUrls?.["48x48"]})`,
             }}
             title={project.name}
           />
@@ -321,7 +358,7 @@ export default function App() {
     );
   }
 
-  // Render: Dashboard Main Area
+  // Dashboard view after authentication
   function DashboardView() {
     const project =
       jiraProjects.find((p) => p.key === selectedProjectKey) || null;
@@ -357,7 +394,7 @@ export default function App() {
     );
   }
 
-  // Render: Loading screen
+  // Loading screen view
   function LoadingOverlay() {
     return (
       <div className="app-bg loading-overlay">
@@ -366,11 +403,11 @@ export default function App() {
     );
   }
 
-  // App main render
+  // Main render logic
   if (step === "login") return <LoginForm />;
   if (step === "loading") return <LoadingOverlay />;
   if (step === "dashboard") return <DashboardView />;
-  // Fallback
+  // Fallback state
   return (
     <div className="app-bg">
       <h2>Unexpected app state.</h2>
