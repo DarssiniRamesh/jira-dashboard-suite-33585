@@ -17,16 +17,19 @@ export default function App() {
   const [jiraProjects, setJiraProjects] = useState([]);
   const [selectedProjectKey, setSelectedProjectKey] = useState(null);
 
-  // Backend proxy API base
-  const BACKEND_BASE = ""; // relative path, assuming same origin/proxy
-
-  // Helper: Normalize Atlassian domain for board links
-  function getCleanJiraDomain() {
-    let url = domain.trim().replace(/^https?:\/\//, "");
+  // Returns standardized Jira domain for board links and requests
+  function getCleanJiraDomain(inputDomain) {
+    let url = (inputDomain || domain || "").trim().replace(/^https?:\/\//, "");
     if (!url.endsWith(".atlassian.net")) {
       url = url.split("/")[0].replace(/\/$/, "") + ".atlassian.net";
     }
     return url;
+  }
+
+  // Helper: Create Authorization header for Jira API (apiToken must be provided)
+  function getJiraAuthHeader(emailArg, apiTokenArg) {
+    const encoded = btoa(`${emailArg}:${apiTokenArg}`);
+    return `Basic ${encoded}`;
   }
 
   // Handler: login form submit
@@ -39,21 +42,21 @@ export default function App() {
     }
     setStep("loading");
     try {
-      // 1. Authenticate via backend proxy (never send credentials to Jira directly from client)
-      const myselfRes = await fetch(`${BACKEND_BASE}/api/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify({
-          domain,
-          email,
-          apiToken,
-        }),
-      });
-      // Error handling
+      // Clean domain to standard Atlassian format
+      const cleanDomain = getCleanJiraDomain(domain);
+
+      // 1. Authenticate directly with Jira API using fetch to proxied /api/myself
+      const myselfRes = await fetch(
+        `/api/myself`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: getJiraAuthHeader(email, apiToken),
+            Accept: "application/json",
+          },
+        }
+      );
+
       if (myselfRes.status === 401) {
         setStep("login");
         setError("Authentication failed. Please check your credentials.");
@@ -67,25 +70,29 @@ export default function App() {
         );
         return;
       }
-      const resData = await myselfRes.json();
-      if (!resData.success) {
-        setStep("login");
-        setError(resData.error || "Login failed.");
-        return;
-      }
-      setJiraUser(resData.user);
+      const jiraUserData = await myselfRes.json();
 
-      // 2. Fetch projects from backend proxy (session must be set now)
-      const projRes = await fetch(`${BACKEND_BASE}/api/projects`, {
+      // Save user fields locally; unlike proxy, all credentials are only in frontend state (not sent to server)
+      const minimalUser = {
+        displayName: jiraUserData.displayName,
+        emailAddress: jiraUserData.emailAddress,
+        accountId: jiraUserData.accountId,
+      };
+      setJiraUser(minimalUser);
+
+      // 2. Fetch user's projects from proxied Jira endpoint, again with credentials
+      //   https://${domain}/rest/api/3/project/search?expand=description,lead,avatarUrls&orderBy=key
+      const projectURL = `/api/project/search?expand=description,lead,avatarUrls&orderBy=key`;
+      const projRes = await fetch(projectURL, {
         method: "GET",
         headers: {
+          Authorization: getJiraAuthHeader(email, apiToken),
           Accept: "application/json",
         },
-        credentials: "include",
       });
       if (projRes.status === 401) {
         setStep("login");
-        setError("Not authenticated with Jira (session expired?).");
+        setError("Not authenticated with Jira (invalid API token or expired).");
         return;
       }
       if (!projRes.ok) {
@@ -103,21 +110,12 @@ export default function App() {
       setStep("dashboard");
     } catch (err) {
       setStep("login");
-      setError("Network error: " + (err.message || "Could not connect to backend."));
+      setError("Network error: " + (err.message || "Could not connect to Jira API."));
     }
   };
 
-  // Handler: Logout
+  // Handler: Logout (frontend only, just clears local state)
   const handleLogout = async () => {
-    try {
-      // Notify backend to clear Jira session credentials
-      await fetch("/api/logout", {
-        method: "POST",
-        credentials: "include",
-      });
-    } catch (err) {
-      // Swallow errors (logout is client and server idempotent)
-    }
     setEmail("");
     setDomain("");
     setApiToken("");
