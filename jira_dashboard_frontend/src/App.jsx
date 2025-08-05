@@ -59,27 +59,35 @@ export default function App() {
         }
       );
 
+      // Handle response with single body read per response
       let jiraUserData = null;
-      if (myselfRes.status === 401) {
-        setStep("login");
-        setError("Authentication failed. Please check your credentials.");
-        return;
-      } else if (!myselfRes.ok) {
-        // Jira may return raw errors, display best feedback
-        let errText, errData;
+      if (!myselfRes.ok) {
+        let errMsg;
         try {
-          errData = await myselfRes.json();
+          // Try parsing JSON response for error
+          const errorJson = await myselfRes.json();
+          if (myselfRes.status === 401) {
+            errMsg =
+              "Authentication failed. Please check your credentials.";
+          } else {
+            errMsg =
+              "Login error: " +
+              (
+                (errorJson && (errorJson.errorMessages?.join(" | ") || errorJson.error)) ||
+                myselfRes.statusText ||
+                myselfRes.status
+              );
+          }
         } catch {
-          errText = await myselfRes.text();
+          // If error body is not valid JSON, fallback to text
+          const text = await myselfRes.text();
+          errMsg =
+            myselfRes.status === 401
+              ? "Authentication failed. Please check your credentials."
+              : "Login error: " + (text || myselfRes.statusText || myselfRes.status);
         }
         setStep("login");
-        setError(
-          "Login error: " +
-            (errData && (errData.errorMessages?.join(" | ") || errData.error) ||
-            errText ||
-            myselfRes.statusText ||
-            myselfRes.status)
-        );
+        setError(errMsg);
         return;
       } else {
         jiraUserData = await myselfRes.json();
@@ -113,31 +121,36 @@ export default function App() {
         }
       );
 
-      let projectsListObj, errRespText, errRespJson;
-      if (projectRes.status === 401) {
-        setStep("login");
-        setError(
-          "Not authenticated with Jira (invalid API token or expired, or insufficient permissions)."
-        );
-        return;
-      }
+      let projectsListObj;
       if (!projectRes.ok) {
+        let errMsg;
         try {
-          errRespJson = await projectRes.json();
+          const errorJson = await projectRes.json();
+          if (projectRes.status === 401) {
+            errMsg =
+              "Not authenticated with Jira (invalid API token or expired, or insufficient permissions).";
+          } else {
+            errMsg =
+              "Failed to fetch projects: " +
+              (
+                (errorJson && (errorJson.errorMessages?.join(" | ") || errorJson.error)) ||
+                projectRes.statusText ||
+                projectRes.status
+              );
+          }
         } catch {
-          errRespText = await projectRes.text();
+          const text = await projectRes.text();
+          errMsg =
+            projectRes.status === 401
+              ? "Not authenticated with Jira (invalid API token or expired, or insufficient permissions)."
+              : "Failed to fetch projects: " + (text || projectRes.statusText || projectRes.status);
         }
         setStep("login");
-        setError(
-          "Failed to fetch projects: " +
-            (errRespJson && (errRespJson.errorMessages?.join(" | ") || errRespJson.error) ||
-            errRespText ||
-            projectRes.statusText ||
-            projectRes.status)
-        );
+        setError(errMsg);
         return;
+      } else {
+        projectsListObj = await projectRes.json();
       }
-      projectsListObj = await projectRes.json();
       const projects = projectsListObj.values || projectsListObj.projects || [];
       setJiraProjects(projects);
       setSelectedProjectKey(projects && projects.length > 0 ? projects[0].key : null);
