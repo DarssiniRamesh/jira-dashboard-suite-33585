@@ -3,8 +3,8 @@ import React, { useState } from "react";
 // PUBLIC_INTERFACE
 /**
  * App - Root component for the Jira Dashboard frontend.
- * Handles: Jira credential login, live authentication, project fetching, modern dashboard UI, and logout.
- * Refactored to remove all backend proxy references: Jira API calls use only the proxied /api/... endpoints (handled by Vite).
+ * Handles authentication, project fetching, dashboard UI, and logout via secure backend proxy endpoints only.
+ * All credential interaction is handled through backend endpoints: /api/login, /api/projects, /api/logout.
  */
 export default function App() {
   // App states
@@ -27,14 +27,8 @@ export default function App() {
     return url;
   }
 
-  // Helper: Create Authorization header value for Jira API requests
-  function getJiraAuthHeader(emailArg, apiTokenArg) {
-    const encoded = btoa(`${emailArg}:${apiTokenArg}`);
-    return `Basic ${encoded}`;
-  }
-
   // Handler: login form submit
-  // Directly calls Jira's /myself and /project/search endpoints (proxied via Vite), handles raw errors
+  // All authentication is handled via backend POST /api/login. Session is maintained by backend using cookies.
   const handleLogin = async (e) => {
     e.preventDefault();
     setError("");
@@ -44,147 +38,138 @@ export default function App() {
     }
     setStep("loading");
     try {
-      // Validate/clean domain but only for links, not fetch path (always use '/api/*')
-      const cleanDomain = getCleanJiraDomain(domain);
+      // Send credentials to backend only.
+      const loginRes = await fetch("/api/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({
+          domain,
+          email,
+          apiToken,
+        }),
+      });
 
-      // Refactored: handles body only once per response
-      // Authenticate by calling proxied /api/myself endpoint
-      const myselfRes = await fetch(
-        `/api/myself`,
-        {
-          method: "GET",
-          headers: {
-            Authorization: getJiraAuthHeader(email, apiToken),
-            Accept: "application/json",
-          },
-        }
-      );
-
-      let jiraUserData = null;
-      if (!myselfRes.ok) {
-        // Always only read the response body ONCE
-        let message = "";
-        let status = myselfRes.status;
-        let errObj = { status, message: myselfRes.statusText };
-        try {
-          const isJson =
-            myselfRes.headers
-              .get("content-type")
-              ?.includes("application/json") || false;
-          if (isJson) {
-            const errorJson = await myselfRes.json();
-            message =
-              status === 401
-                ? "Authentication failed. Please check your credentials."
-                : ((errorJson &&
-                    (errorJson.errorMessages?.join(" | ") ||
-                      errorJson.error)) ||
-                  myselfRes.statusText ||
-                  status);
-          } else {
-            const errorText = await myselfRes.text();
-            message =
-              status === 401
-                ? "Authentication failed. Please check your credentials."
-                : "Login error: " +
-                  (errorText || myselfRes.statusText || status);
-          }
-        } catch (errParse) {
-          message =
-            status === 401
-              ? "Authentication failed. Please check your credentials."
-              : "Login error: " + (myselfRes.statusText || status);
-        }
-        setStep("login");
-        setError(message);
-        return;
-      } else {
-        jiraUserData = await myselfRes.json();
-      }
-
-      if (!jiraUserData || !jiraUserData.displayName) {
-        setStep("login");
-        setError(
-          "Could not get user profile info from Jira (API returned no user data)."
-        );
-        return;
-      }
-
-      // Store minimal user info only in frontend state
-      const minimalUser = {
-        displayName: jiraUserData.displayName,
-        emailAddress: jiraUserData.emailAddress,
-        accountId: jiraUserData.accountId,
-      };
-      setJiraUser(minimalUser);
-
-      // Now get user's projects from proxied /api/project/search
-      const projectRes = await fetch(
-        `/api/project/search?expand=description,lead,avatarUrls&orderBy=key`,
-        {
-          method: "GET",
-          headers: {
-            Authorization: getJiraAuthHeader(email, apiToken),
-            Accept: "application/json",
-          },
-        }
-      );
-
-      let projectsListObj;
-      if (!projectRes.ok) {
-        // Only read response body ONCE for errors
-        let status = projectRes.status;
+      let loginData;
+      if (!loginRes.ok) {
+        let status = loginRes.status;
         let message = "";
         try {
-          const isJson =
-            projectRes.headers
-              .get("content-type")
-              ?.includes("application/json") || false;
+          const isJson = loginRes.headers
+            .get("content-type")
+            ?.includes("application/json");
           if (isJson) {
-            const errorJson = await projectRes.json();
+            const errorJson = await loginRes.json();
             message =
-              status === 401
-                ? "Not authenticated with Jira (invalid API token or expired, or insufficient permissions)."
-                : ((errorJson &&
-                    (errorJson.errorMessages?.join(" | ") ||
-                      errorJson.error)) ||
-                  projectRes.statusText ||
-                  status);
+              (errorJson && (errorJson.error || errorJson.message)) ||
+              loginRes.statusText ||
+              status;
           } else {
-            const text = await projectRes.text();
+            const errorText = await loginRes.text();
             message =
-              status === 401
-                ? "Not authenticated with Jira (invalid API token or expired, or insufficient permissions)."
-                : "Failed to fetch projects: " +
-                  (text || projectRes.statusText || status);
+              errorText ||
+              (status === 401
+                ? "Jira authentication failed. Check credentials."
+                : loginRes.statusText ||
+                  "Login error (" + status + ")");
           }
         } catch (parseErr) {
           message =
             status === 401
-              ? "Not authenticated with Jira (invalid API token or expired, or insufficient permissions)."
-              : "Failed to fetch projects: " + (projectRes.statusText || status);
+              ? "Jira authentication failed. Check credentials."
+              : "Login error: " + (loginRes.statusText || status);
         }
         setStep("login");
         setError(message);
         return;
       } else {
-        projectsListObj = await projectRes.json();
+        loginData = await loginRes.json();
       }
-      const projects = projectsListObj.values || projectsListObj.projects || [];
+
+      if (!loginData.success || !loginData.user) {
+        setStep("login");
+        setError(
+          loginData.error ||
+            "Invalid response from backend. Could not retrieve user info."
+        );
+        return;
+      }
+
+      setJiraUser({
+        displayName: loginData.user.displayName,
+        emailAddress: loginData.user.emailAddress,
+        accountId: loginData.user.accountId,
+      });
+
+      // Now fetch user's projects using backend proxy (GET /api/projects), using session cookie.
+      const projectsRes = await fetch("/api/projects", {
+        method: "GET",
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+
+      let projectsListObj;
+      if (!projectsRes.ok) {
+        let status = projectsRes.status;
+        let message = "";
+        try {
+          const isJson = projectsRes.headers
+            .get("content-type")
+            ?.includes("application/json");
+          if (isJson) {
+            const errorJson = await projectsRes.json();
+            message =
+              (errorJson && (errorJson.error || errorJson.message)) ||
+              projectsRes.statusText ||
+              status;
+          } else {
+            const text = await projectsRes.text();
+            message =
+              "Failed to fetch projects: " +
+              (text || projectsRes.statusText || status);
+          }
+        } catch (parseErr) {
+          message =
+            "Failed to fetch projects: " + (projectsRes.statusText || status);
+        }
+        setStep("login");
+        setError(message);
+        return;
+      } else {
+        projectsListObj = await projectsRes.json();
+      }
+
+      // Jira backend API always returns { values: [ ... ] }, but fallback to .projects if format ever changes
+      const projects =
+        projectsListObj.values || projectsListObj.projects || [];
       setJiraProjects(projects);
-      setSelectedProjectKey(projects && projects.length > 0 ? projects[0].key : null);
+      setSelectedProjectKey(
+        projects && projects.length > 0 ? projects[0].key : null
+      );
       setStep("dashboard");
     } catch (err) {
       setStep("login");
       setError(
         "Network error: " +
-          ((err && err.message) || "Could not connect to Jira API.")
+          ((err && err.message) || "Could not communicate with backend.")
       );
     }
   };
 
-  // Handler: Logout (frontend only, fully resets all state)
-  const handleLogout = () => {
+  // Handler: Logout (uses backend endpoint to clear session, then resets frontend state)
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/logout", {
+        method: "POST",
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+    } catch {
+      // Ignore errors; we clear frontend state regardless
+    }
     setEmail("");
     setDomain("");
     setApiToken("");
